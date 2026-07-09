@@ -6,7 +6,7 @@ import os
 import json
 import anthropic
 from fastapi import FastAPI, HTTPException
-from models import NormalizedFailure, DiagnosisResult
+from models import CollectedFailure, DiagnosisResult
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,13 +14,18 @@ load_dotenv()
 app = FastAPI(title="Diagnosis Agent")
 _client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-_SYSTEM = """You are a senior data engineer and on-call expert.
-Diagnose the pipeline failure and respond with ONLY valid JSON — no markdown, no extra text.
+_SYSTEM = """You are a senior data engineer performing root cause analysis on a pipeline failure.
+
+The Log Collector agent has already parsed and pre-classified this failure for you.
+Your job is to go deeper: explain WHY this happened, not just what happened,
+and give the engineer a concrete fix they can act on immediately.
+
+Respond with ONLY valid JSON — no markdown, no extra text.
 
 Schema:
 {
-  "root_cause": "plain-English explanation of what went wrong and why",
-  "suggested_fix": "concrete action the engineer should take right now",
+  "root_cause": "2-4 sentences explaining the underlying reason this failure occurred",
+  "suggested_fix": "step-by-step action the engineer should take right now to resolve it",
   "severity": "low | medium | high",
   "confidence": "low | medium | high"
 }"""
@@ -32,16 +37,30 @@ def health():
 
 
 @app.post("/diagnose", response_model=DiagnosisResult)
-def diagnose(failure: NormalizedFailure):
-    prompt = f"""Pipeline failure — please diagnose.
+def diagnose(failure: CollectedFailure):
+    if not failure.ready_for_analysis:
+        raise HTTPException(
+            status_code=422,
+            detail="Log Collector flagged this failure as not ready for analysis — insufficient log data."
+        )
 
-Tool: {failure.tool}
-Job: {failure.job_name}
-Environment: {failure.environment}
-Error: {failure.error_message}
+    relevant = "\n".join(failure.relevant_logs) if failure.relevant_logs else failure.log_excerpt
 
-Log excerpt:
-{failure.log_excerpt}"""
+    prompt = f"""Pipeline failure to diagnose:
+
+Tool:               {failure.tool.upper()}
+Job:                {failure.job_name}
+Environment:        {failure.environment}
+Error category:     {failure.error_category or "Unknown"}
+Affected component: {failure.affected_component or "Unknown"}
+Severity hint:      {failure.severity_hint or "Unknown"}
+Pre-summary:        {failure.summary or "None"}
+
+Original error message:
+{failure.error_message}
+
+Relevant log lines (noise already removed by Log Collector):
+{relevant}"""
 
     try:
         response = _client.messages.create(
@@ -60,6 +79,7 @@ Log excerpt:
             raw = raw[4:]
 
     data = json.loads(raw)
+
     return DiagnosisResult(
         **failure.model_dump(),
         root_cause=data["root_cause"],

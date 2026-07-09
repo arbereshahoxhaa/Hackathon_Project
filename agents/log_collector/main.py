@@ -5,11 +5,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import os
 import json
 from datetime import datetime
-from typing import List, Optional
 import anthropic
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from models import NormalizedFailure
+from models import CollectedFailure
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,7 +20,7 @@ _SYSTEM = """You are a Log Collector Agent in an AI-powered incident diagnosis s
 You are given already-parsed failure info (job name, environment, error message, log excerpt)
 for a pipeline run. Enrich it for the next agent by identifying:
 
-- error severity: Critical | High | Medium | Low
+- error severity: high | medium | low
 - error category: one of Authentication failure, Permission issue, Network/connectivity problem,
   Database failure, Schema mismatch, Configuration issue, Resource limitation, Unknown
 - the affected component/service name
@@ -34,7 +33,7 @@ Do not try to fix the problem. Respond with ONLY valid JSON — no markdown, no 
 
 Schema:
 {
-  "severity_hint": "Critical | High | Medium | Low",
+  "severity_hint": "high | medium | low",
   "error_category": "...",
   "affected_component": "...",
   "summary": "...",
@@ -46,15 +45,6 @@ Schema:
 class RawEvent(BaseModel):
     tool: str
     raw_payload: dict
-
-
-class CollectedFailure(NormalizedFailure):
-    severity_hint: Optional[str] = None
-    error_category: Optional[str] = None
-    affected_component: Optional[str] = None
-    summary: Optional[str] = None
-    relevant_logs: List[str] = []
-    ready_for_analysis: bool = True
 
 
 @app.get("/health")

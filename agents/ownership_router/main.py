@@ -7,6 +7,9 @@ import yaml
 from fastapi import FastAPI
 from pydantic import BaseModel
 from models import OwnerInfo
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI(title="Ownership Router Agent")
 

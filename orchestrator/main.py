@@ -17,7 +17,7 @@ DIAGNOSIS      = os.getenv("DIAGNOSIS_URL",       "http://localhost:8002")
 OWNERSHIP      = os.getenv("OWNERSHIP_URL",       "http://localhost:8003")
 NOTIFICATION   = os.getenv("NOTIFICATION_URL",    "http://localhost:8004")
 
-TIMEOUT = httpx.Timeout(60.0)
+TIMEOUT = httpx.Timeout(120.0)   # two Claude calls in the pipeline (Agent 1 + Agent 2)
 
 
 class FailureRequest(BaseModel):
@@ -35,13 +35,13 @@ def health():
 def handle_failure(request: FailureRequest):
     with httpx.Client(timeout=TIMEOUT) as client:
 
-        # Step 1 — Normalise logs
+        # Step 1 — Parse, normalise, and enrich logs (Agent 1)
         r = client.post(f"{LOG_COLLECTOR}/collect",
                         json={"tool": request.tool, "raw_payload": request.raw_payload})
         _check(r, "log-collector")
         normalized = r.json()
 
-        # Step 2 — AI Diagnosis (only agent using LLM)
+        # Step 2 — Root cause analysis (Agent 2) — receives enriched CollectedFailure
         r = client.post(f"{DIAGNOSIS}/diagnose", json=normalized)
         _check(r, "diagnosis")
         diagnosis = r.json()
@@ -56,8 +56,9 @@ def handle_failure(request: FailureRequest):
                         json={"diagnosis": diagnosis, "owner": owner,
                               "slack_channel": request.slack_channel})
         _check(r, "notification")
+        notification = r.json()
 
-    return {"normalized": normalized, "diagnosis": diagnosis, "owner": owner}
+    return {"normalized": normalized, "diagnosis": diagnosis, "owner": owner, "notification": notification}
 
 
 def _check(response: httpx.Response, service: str):

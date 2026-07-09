@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0"
 echo Starting all PipelineDoc services...
 
 start "log-collector"    cmd /k "uvicorn agents.log_collector.main:app --port 8001 --reload"
