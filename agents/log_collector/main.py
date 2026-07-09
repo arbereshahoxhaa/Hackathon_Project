@@ -2,12 +2,45 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import os
+import json
 from datetime import datetime
+from typing import List, Optional
+import anthropic
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from models import NormalizedFailure
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI(title="Log Collector Agent")
+_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+_SYSTEM = """You are a Log Collector Agent in an AI-powered incident diagnosis system.
+You are given already-parsed failure info (job name, environment, error message, log excerpt)
+for a pipeline run. Enrich it for the next agent by identifying:
+
+- error severity: Critical | High | Medium | Low
+- error category: one of Authentication failure, Permission issue, Network/connectivity problem,
+  Database failure, Schema mismatch, Configuration issue, Resource limitation, Unknown
+- the affected component/service name
+- a one-to-two sentence summary of the failure
+- the relevant log lines only — drop repeated lines, debug messages, and successful execution
+  messages, keep only what helps diagnose the failure
+- whether this is enough information for root-cause analysis (ready_for_analysis)
+
+Do not try to fix the problem. Respond with ONLY valid JSON — no markdown, no extra text.
+
+Schema:
+{
+  "severity_hint": "Critical | High | Medium | Low",
+  "error_category": "...",
+  "affected_component": "...",
+  "summary": "...",
+  "relevant_logs": ["...", "..."],
+  "ready_for_analysis": true
+}"""
 
 
 class RawEvent(BaseModel):
@@ -15,19 +48,65 @@ class RawEvent(BaseModel):
     raw_payload: dict
 
 
+class CollectedFailure(NormalizedFailure):
+    severity_hint: Optional[str] = None
+    error_category: Optional[str] = None
+    affected_component: Optional[str] = None
+    summary: Optional[str] = None
+    relevant_logs: List[str] = []
+    ready_for_analysis: bool = True
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "log-collector", "port": 8001}
 
 
-@app.post("/collect", response_model=NormalizedFailure)
+@app.post("/collect", response_model=CollectedFailure)
 def collect(event: RawEvent):
     parsers = {"airflow": _airflow, "dbt": _dbt, "fivetran": _fivetran}
     parser = parsers.get(event.tool)
     if not parser:
         raise HTTPException(status_code=400, detail=f"Unsupported tool: {event.tool}")
     fields = parser(event.raw_payload)
-    return NormalizedFailure(tool=event.tool, **fields)
+    enrichment = _enrich(event.tool, fields)
+    return CollectedFailure(tool=event.tool, **fields, **enrichment)
+
+
+def _enrich(tool: str, fields: dict) -> dict:
+    prompt = f"""Tool: {tool}
+Job: {fields['job_name']}
+Environment: {fields['environment']}
+Error: {fields['error_message']}
+
+Log excerpt:
+{fields['log_excerpt']}"""
+
+    try:
+        response = _client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Claude API error: {exc}")
+
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+
+    data = json.loads(raw)
+    return {
+        "severity_hint": data.get("severity_hint"),
+        "error_category": data.get("error_category", "Unknown"),
+        "affected_component": data.get("affected_component"),
+        "summary": data.get("summary"),
+        "relevant_logs": data.get("relevant_logs", []),
+        "ready_for_analysis": data.get("ready_for_analysis", True),
+    }
 
 
 def _airflow(p: dict) -> dict:
