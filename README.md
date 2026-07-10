@@ -1,148 +1,146 @@
-# Investigator Agent — Person 3
+# PipelineDoc
 
-The **Investigator** is the third stage of the automated job-failure diagnosis
-pipeline. Triage hands it a failed job it couldn't resolve from rules; the
-Investigator gathers evidence with tools and returns a structured **Diagnosis**.
-
-```
-Person 1        Person 2            >> Person 3 <<          Person 4
-Ingestion  -->  Triage/Rules  -->   Investigator     -->   Explainer/Output
-               (TriageObject)       (this package)         (Diagnosis)
-```
-
-**Acceptance criterion (met):** given a mocked triage object, the Investigator
-calls at least two tools and returns a valid `Diagnosis`. It ships a
-hardcoded/deterministic engine that runs *right now* with no network, and a
-Claude tool-use engine that activates automatically when an API key is present.
-
-## Quick start
-
-```bash
-# Runs offline out of the box (deterministic engine, no API key needed)
-python run_investigator.py                # all three demo scenarios
-python run_investigator.py dependency     # one scenario
-python run_investigator.py code --json    # machine-readable Diagnosis
-
-# Run the tests
-python -m unittest discover -s tests -v   # (or: python -m pytest tests/)
-```
-
-To use the live Claude engine, install `anthropic` and set a key — the agent
-auto-detects it:
-
-```bash
-pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...       # PowerShell: $env:ANTHROPIC_API_KEY="..."
-python run_investigator.py
-```
-
-If the LLM call fails for any reason, the agent falls back to the deterministic
-engine rather than crashing.
-
-## Public API (for Person 6 — integration)
-
-```python
-from investigator import investigate, Investigator, InvestigatorConfig
-from investigator import TriageObject, Diagnosis, Category
-
-# one-call:
-diagnosis = investigate(triage_object)
-
-# or configured:
-agent = Investigator(InvestigatorConfig(use_llm=False, max_iterations=6))
-diagnosis = agent.investigate(triage_object)
-```
-
-`investigate()` never raises — worst case it returns a low-confidence Diagnosis
-with `needs_human=True`.
-
-## The contracts (the seams)
-
-Both objects have `to_dict()` / `from_dict()` so stages can hand off JSON across
-processes/queues without importing this package. Full definitions in
-`investigator/contracts.py`.
-
-### Input — `TriageObject` (from Person 2)
-
-| field | meaning |
-|---|---|
-| `incident_id` | unique id, echoed back on the Diagnosis |
-| `job_id` | the failed job/service |
-| `error_signature` | normalized error fingerprint (used to match memory) |
-| `category` | triage's guess (`Category`, may be `unknown`) |
-| `severity` | `low` / `medium` / `high` / `critical` |
-| `error_excerpt` | the key error region (from Person 1) |
-| `cleaned_log` | the ~100-line cleaned blob (from Person 1) |
-| `escalated_reason` | why triage escalated instead of resolving |
-| `metadata` | dict: `service`, `commit_sha`, `error_file`, `error_line`, `dependency`, ... |
-
-### Output — `Diagnosis` (to Person 4)
-
-| field | meaning |
-|---|---|
-| `incident_id` | matches the input |
-| `root_cause` | the single most likely cause |
-| `category` | resolved `Category` |
-| `confidence` | `0.0`–`1.0`; `confidence_label` → `low`/`medium`/`high` |
-| `recommended_fix` | concrete next step |
-| `suggested_owner` | team to tag (nullable) |
-| `evidence` | list of `Evidence(source, detail, snippet)` — traceable to the tool |
-| `related_past_incidents` | ids of matched memory entries |
-| `tools_used` | ordered list of tool calls |
-| `reasoning_steps` | audit trail (incl. model thinking summaries) |
-| `needs_human` | `True` when confidence is too low to act automatically |
-| `model` | which engine produced it |
+AI-powered pipeline failure diagnosis. When a scheduled job fails, PipelineDoc reads the logs, identifies the root cause, and posts a plain-English summary to Slack — tagging the right owner.
 
 ## How it works
 
-Two engines behind one interface (`investigator/investigator.py`):
+```
+Raw logs → Log Collector → Diagnosis (Claude) → Owner Lookup → Slack Notification
+```
 
-- **Deterministic engine** — calls the tools in a fixed, sensible order per
-  category (always `query_past_incidents` + `search_logs` first, then
-  category-specific corroboration), then synthesizes a Diagnosis from what came
-  back. Offline, reproducible, ships first. This is the "hardcoded-tool version."
-- **Claude engine** — a manual tool-use loop. The model calls investigation
-  tools, reads results, and finally calls `submit_diagnosis` to stop. Uses
-  `claude-opus-4-8` with adaptive thinking.
+Four agents run in sequence (steps 2 and 3 run in parallel):
 
-**Stop conditions** (Claude engine): the model calls `submit_diagnosis`; or the
-loop hits `max_iterations` (then a Diagnosis is synthesized from evidence and
-flagged); or the model ends its turn without a tool (nudged once toward a verdict).
+| Agent | Port | Role |
+|---|---|---|
+| Log Collector | 8001 | Parses Airflow / dbt / Fivetran logs, extracts key fields |
+| Diagnosis | 8002 | Claude performs root cause analysis |
+| Ownership Router | 8003 | Looks up the on-call owner from `pipeline_owners.yaml` |
+| Notification | 8004 | Posts a formatted alert to Slack |
+| Orchestrator | 8000 | Chains all four agents |
+| Frontend | 8501 | Streamlit UI |
 
-**Confidence scoring** (`investigator/confidence.py`): an evidence-only heuristic
-(more distinct tools, a matched past incident, a pinpointed code line/dead
-dependency → higher) is blended with the model's self-reported confidence, so
-thin-evidence over-confidence gets pulled down. The deterministic engine uses
-the heuristic alone.
+---
 
-## Tools
+## Prerequisites
 
-Defined in `investigator/tools.py`, backed by offline fixtures in
-`investigator/mock_data.py`:
+- Python 3.12
+- An Anthropic API key
+- (Optional) A Slack bot token for real Slack posting — without one the alert prints to the console
 
-| tool | purpose |
-|---|---|
-| `query_past_incidents` | search the memory store of past failures + fixes (Person 5's SQLite) |
-| `search_logs` | grep the cleaned log |
-| `read_code` | read source around a traceback `file:line` |
-| `get_recent_deploys` | recent deploys/commits to catch regressions |
-| `check_dependency_health` | status of a downstream dependency |
-| `submit_diagnosis` | the stop tool the model calls to commit its verdict |
+---
 
-**Going live:** replace a tool's `run` implementation with one that hits the
-real store, keeping the return shape. Nothing in the reasoning loop changes. In
-particular, `query_past_incidents` should call Person 5's SQLite table.
+## Setup
 
-## Layout
+**1. Clone and enter the project**
+```bash
+git clone <repo-url>
+cd Hackathon_Project
+```
+
+**2. Create and activate a virtual environment**
+```bash
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+
+# Mac / Linux
+source .venv/bin/activate
+```
+
+**3. Install dependencies**
+```bash
+pip install -r requirements.txt
+```
+
+**4. Configure environment variables**
+```bash
+copy .env.example .env   # Windows
+cp .env.example .env     # Mac / Linux
+```
+
+Edit `.env` and fill in:
+```
+ANTHROPIC_API_KEY=sk-ant-...
+SLACK_BOT_TOKEN=xoxb-...      # optional — leave blank to use console fallback
+SLACK_CHANNEL=#data-alerts
+```
+
+**5. (Optional) Edit pipeline owners**
+
+Open `pipeline_owners.yaml` and map your job name patterns to team members.
+
+---
+
+## Run
+
+**Activate your venv first**, then launch everything with one command:
+
+```bash
+# Windows
+.venv\Scripts\activate
+start_all.bat
+```
+
+This opens six terminal windows (five backend services + the Streamlit UI).
+
+**Open the UI:** http://localhost:8501
+
+---
+
+## Demo a failure
+
+### Option A — Browser UI (recommended for demos)
+
+1. Open http://localhost:8501
+2. Select a tool (dbt / Airflow / Fivetran) in the sidebar
+3. Click **Diagnose Failure**
+
+### Option B — CLI
+
+```bash
+python demo/simulate_failure.py dbt
+python demo/simulate_failure.py airflow
+python demo/simulate_failure.py fivetran
+```
+
+### Option C — Direct API call
+
+```bash
+curl -X POST http://localhost:8000/failure \
+  -H "Content-Type: application/json" \
+  -d '{"tool": "dbt", "raw_payload": {...}, "slack_channel": "#data-alerts"}'
+```
+
+---
+
+## Health check
+
+```bash
+curl http://localhost:8000/health
+```
+
+Returns the status of all downstream services.
+
+---
+
+## Project structure
 
 ```
-investigator/
-  contracts.py     # TriageObject, Diagnosis, Evidence, Category (the seams)
-  tools.py         # tool registry, JSON schemas, mock implementations
-  investigator.py  # the two engines + confidence wiring + stop conditions
-  confidence.py    # evidence heuristic + blend
-  prompts.py       # system prompt + initial-message builder
-  mock_data.py     # offline fixtures + 3 demo scenarios (one per category)
-run_investigator.py  # demo CLI
-tests/test_investigator.py
+Hackathon_Project/
+├── orchestrator/main.py          # Chains all agents, parallel execution
+├── agents/
+│   ├── log_collector/main.py     # Agent 1: parse + enrich logs (Claude)
+│   ├── diagnosis/main.py         # Agent 2: root cause analysis (Claude)
+│   ├── ownership_router/main.py  # Agent 3: YAML owner lookup
+│   └── notification/main.py      # Agent 4: Slack post
+├── frontend/app.py               # Streamlit UI
+├── models.py                     # Shared Pydantic models
+├── pipeline_owners.yaml          # Job → owner mapping
+├── demo/
+│   ├── simulate_failure.py       # CLI demo script
+│   └── sample_logs/              # Sample Airflow / dbt / Fivetran payloads
+├── start_all.bat                 # One-command launch (Windows)
+├── requirements.txt
+└── .env.example
 ```

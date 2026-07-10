@@ -1,0 +1,12 @@
+{
+  "connector_id": "hubspot_crm_prod",
+  "connector_name": "hubspot_crm",
+  "schema_name": "hubspot",
+  "created": "2024-06-15T04:30:00Z",
+  "environment": "production",
+  "data": {
+    "task_id": "sync_20240615_043000",
+    "failure_message": "API quota exceeded: You have exceeded the HubSpot API rate limit. Your request for daily data has been rate limited (10000 requests/day). Please wait 24 hours or upgrade your HubSpot plan.",
+    "message": "Fivetran sync failure\nConnector: hubspot_crm\nSchema: hubspot\nError Code: API_LIMIT_EXCEEDED\nDetails: HubSpot API responded with HTTP 429 Too Many Requests after 10000 calls in current billing period.\nAffected tables: contacts, deals, companies, engagements\nLast successful sync: 2024-06-14T04:30:00Z"
+  }
+}

@@ -1,3 +1,7 @@
-# The Investigator runs offline (deterministic engine) with ZERO dependencies.
-# `anthropic` is only needed for the live Claude tool-use engine.
-anthropic>=0.116.0
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+httpx==0.27.0
+anthropic==0.28.0
+slack-sdk==3.27.2
+pyyaml==6.0.1
+streamlit==1.41.0
