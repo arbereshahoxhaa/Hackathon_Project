@@ -1,0 +1,3 @@
+# The Investigator runs offline (deterministic engine) with ZERO dependencies.
+# `anthropic` is only needed for the live Claude tool-use engine.
+anthropic>=0.116.0
