@@ -30,32 +30,54 @@ args = parser.parse_args()
 tool, sample_file = TOOLS[args.tool]
 raw_payload = json.loads(sample_file.read_text())
 
-print(f"\n Firing {tool.upper()} failure → orchestrator...")
+print(f"\n  Firing {tool.upper()} failure → orchestrator...")
+print("  (this takes ~15-30 seconds — two Claude calls in the pipeline)\n")
 
 try:
     resp = httpx.post(
         f"{ORCHESTRATOR}/failure",
         json={"tool": tool, "raw_payload": raw_payload, "slack_channel": args.channel},
-        timeout=90,
+        timeout=120,
     )
     resp.raise_for_status()
 except httpx.ConnectError:
-    print("Cannot reach orchestrator at localhost:8000. Run start_all.bat first.")
+    print("  ERROR: Cannot reach orchestrator at localhost:8000")
+    print("  Run start_all.bat first, wait a few seconds, then retry.")
     sys.exit(1)
 except httpx.HTTPStatusError as e:
-    print(f"Error {e.response.status_code}: {e.response.text}")
+    print(f"  ERROR {e.response.status_code}: {e.response.text}")
     sys.exit(1)
 
 result = resp.json()
 d = result["diagnosis"]
 o = result["owner"]
+notif = result.get("notification", {})
 
-print("=" * 60)
-print(f"  JOB:       {d['job_name']}")
-print(f"  SEVERITY:  {d['severity'].upper()}  |  CONFIDENCE: {d['confidence'].upper()}")
-print(f"  OWNER:     {o['name']} ({o['slack_handle']})")
-print("=" * 60)
-print(f"\nROOT CAUSE\n{d['root_cause']}")
-print(f"\nSUGGESTED FIX\n{d['suggested_fix']}")
-print("\n Slack notification sent!")
-print("=" * 60)
+SEP = "=" * 65
+THIN = "-" * 65
+
+print(SEP)
+print(f"  JOB        {d['job_name']}")
+print(f"  TOOL       {d['tool'].upper()}   |   ENVIRONMENT  {d['environment']}")
+print(f"  CATEGORY   {d.get('error_category', 'Unknown')}")
+print(f"  COMPONENT  {d.get('affected_component', 'Unknown')}")
+print(THIN)
+print(f"  SEVERITY   {d['severity'].upper()}   |   CONFIDENCE  {d['confidence'].upper()}")
+print(f"  OWNER      {o['name']} ({o['slack_handle']})")
+print(SEP)
+
+print(f"\n  ROOT CAUSE")
+print(f"  {d['root_cause']}\n")
+
+print(f"  SUGGESTED FIX")
+print(f"  {d['suggested_fix']}\n")
+
+mode = notif.get("mode", "unknown")
+if mode == "slack":
+    print(f"  Slack notification sent to {notif.get('channel')}  (ts: {notif.get('ts')})")
+elif mode == "console":
+    print(f"  Notification printed to console (no SLACK_BOT_TOKEN configured)")
+else:
+    print(f"  Notification status: {notif}")
+
+print(SEP)

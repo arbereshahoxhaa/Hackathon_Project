@@ -9,6 +9,7 @@ import anthropic
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from models import CollectedFailure
+from utils import parse_llm_json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,11 +24,10 @@ for a pipeline run. Enrich it for the next agent by identifying:
 - error severity: high | medium | low
 - error category: one of Authentication failure, Permission issue, Network/connectivity problem,
   Database failure, Schema mismatch, Configuration issue, Resource limitation, Unknown
-- the affected component/service name
-- a one-to-two sentence summary of the failure
-- the relevant log lines only — drop repeated lines, debug messages, and successful execution
-  messages, keep only what helps diagnose the failure
-- whether this is enough information for root-cause analysis (ready_for_analysis)
+- the affected component/service name (e.g. "PROD_DB.RAW.STRIPE_CHARGES", "snowflake_prod connection", "HubSpot API")
+- a one-to-two sentence plain-English summary of what failed
+- the relevant log lines only — drop INFO lines, repeated lines, and successful steps; keep only lines that show the error
+- whether there is enough information for root-cause analysis (ready_for_analysis)
 
 Do not try to fix the problem. Respond with ONLY valid JSON — no markdown, no extra text.
 
@@ -58,6 +58,7 @@ def collect(event: RawEvent):
     parser = parsers.get(event.tool)
     if not parser:
         raise HTTPException(status_code=400, detail=f"Unsupported tool: {event.tool}")
+
     fields = parser(event.raw_payload)
     enrichment = _enrich(event.tool, fields)
     return CollectedFailure(tool=event.tool, **fields, **enrichment)
@@ -82,15 +83,13 @@ Log excerpt:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Claude API error: {exc}")
 
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+    try:
+        data = parse_llm_json(response.content[0].text)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to parse Claude response: {exc}")
 
-    data = json.loads(raw)
     return {
-        "severity_hint": data.get("severity_hint"),
+        "severity_hint": data.get("severity_hint", "medium"),
         "error_category": data.get("error_category", "Unknown"),
         "affected_component": data.get("affected_component"),
         "summary": data.get("summary"),
@@ -98,6 +97,8 @@ Log excerpt:
         "ready_for_analysis": data.get("ready_for_analysis", True),
     }
 
+
+# ── Parsers ────────────────────────────────────────────────────────────────
 
 def _airflow(p: dict) -> dict:
     log = p.get("log", "")
